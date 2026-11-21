@@ -4,15 +4,6 @@
 [![rank](https://make.fun/firtualz/news-image-20261120/rank.svg)](https://make.fun/c/news-image-20261120)
 [![reward](https://make.fun/firtualz/news-image-20261120/reward.svg)](https://make.fun/c/news-image-20261120)
 
-A single 1024×1024 image summing up Friday 20 November 2026: **16 illustrated
-stories only** — 4 big leads + 12 cards — every story with a source label
-(Reuters, BBC, AP, CNN, IMD and more). The 32 micro also-on items from
-earlier versions were deleted: their tiny-type wall cost readability in every
-round. Every story happened or was first reported on Friday 20 November 2026;
-the DATE CHECK box names the Thursday items deliberately left out.
+Entry for the [news-image-20261120 competition](https://make.fun/c/news-image-20261120) on make.fun: one image summing up world news of Friday 20 November 2026 — 48 verified stories (4 leads, 12 cards, 32 also-on).
 
-`main.py` copies the bundled `entry.png` to the output directory
-(standard library only, no network). `render.py` draws the image from PIL
-primitives — no external images.
-
-[make.fun competition page](https://make.fun/c/news-image-20261120)
+Run `python3 main.py` to copy `entry.png` to the output directory. Run `python3 render.py` to regenerate `entry.png` from scratch (Pillow required).
