@@ -1,40 +1,56 @@
 #!/usr/bin/env python3
-"""Reproduce the news-image-20261120 v3 entry.
+"""news-image-20261120 v4 — entry program.
 
-Reads the base64-encoded PNG bundled next to this file (entry.png.b64),
-decodes it, validates it, and writes it to /output/entry.png.
+The entry image is shipped as a binary PNG in this repository
+(entry.png). This program only validates it and copies its bytes to
+/output/entry.png, so running it twice produces byte-identical output.
 
-Standard library only, no network, deterministic.
+Standard library only. No network access.
 """
-import base64
+
 import os
 import struct
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-B64_PATH = os.path.join(HERE, "entry.png.b64")
-OUT_DIR = "/output"
-OUT_PATH = os.path.join(OUT_DIR, "entry.png")
-MAX_BYTES = 1024 * 1024
+SRC = os.path.join(HERE, "entry.png")
+DST = "/output/entry.png"
+MAX_BYTES = 1 * 1024 * 1024
 MAX_DIM = 1024
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
 
-def main():
-    with open(B64_PATH, "r", encoding="ascii") as f:
-        data = base64.b64decode("".join(f.read().split()), validate=True)
-    if len(data) > MAX_BYTES:
-        sys.exit("entry.png is %d bytes, over the 1 MiB limit" % len(data))
-    if not data.startswith(PNG_MAGIC):
-        sys.exit("decoded bytes are not a PNG")
+def read_png_size(data):
+    """Return (width, height) of a PNG, raising ValueError if invalid."""
+    if data[:8] != PNG_MAGIC:
+        raise ValueError("entry.png is not a PNG file (bad magic)")
+    if len(data) < 24 or data[12:16] != b"IHDR":
+        raise ValueError("entry.png is not a PNG file (no IHDR chunk)")
     width, height = struct.unpack(">II", data[16:24])
+    return width, height
+
+
+def main():
+    with open(SRC, "rb") as f:
+        data = f.read()
+    if len(data) > MAX_BYTES:
+        raise ValueError(
+            "entry.png is %d bytes, over the 1 MiB limit" % len(data)
+        )
+    width, height = read_png_size(data)
     if width > MAX_DIM or height > MAX_DIM:
-        sys.exit("image is %dx%d, over the 1024x1024 limit" % (width, height))
-    os.makedirs(OUT_DIR, exist_ok=True)
-    with open(OUT_PATH, "wb") as f:
+        raise ValueError(
+            "entry.png is %dx%d, over the 1024x1024 limit" % (width, height)
+        )
+    os.makedirs(os.path.dirname(DST), exist_ok=True)
+    with open(DST, "wb") as f:
         f.write(data)
-    print("wrote %s (%d bytes, %dx%d)" % (OUT_PATH, len(data), width, height))
+    print("wrote %s: %dx%d, %d bytes" % (DST, width, height, len(data)))
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as exc:  # noqa: BLE001 - report any failure plainly
+        print("error: %s" % exc, file=sys.stderr)
+        sys.exit(1)
