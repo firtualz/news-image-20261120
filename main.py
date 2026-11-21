@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""news-image-20261120 v13fix — entry program.
+"""news-image-20261120 v15 — entry program.
 
-The entry image is shipped as a binary PNG in this repository
-(entry.png). This program only validates it and copies its bytes to
-the output location, so running it twice produces byte-identical output.
+The entry image is shipped as a finished PNG in this repository
+(entry.png). This program only validates that PNG and copies its
+bytes to the output location, so running it twice always produces
+byte-identical output.
 
-Standard library only. No network access.
+Standard library only (os, struct, sys). No network access, no image
+libraries, no child processes, no font files: the grading machine
+only needs a Python interpreter and the bundled entry.png.
 """
 
 import os
@@ -27,7 +30,7 @@ def output_path():
     return "/output/entry.png"
 
 
-def read_png_size(data):
+def png_size(data):
     """Return (width, height) of a PNG, raising ValueError if invalid."""
     if data[:8] != PNG_MAGIC:
         raise ValueError("entry.png is not a PNG file (bad magic)")
@@ -46,13 +49,16 @@ def main():
         raise ValueError(
             "entry.png is %d bytes, over the 1 MiB limit" % len(data)
         )
-    width, height = read_png_size(data)
+    width, height = png_size(data)
     if width > MAX_DIM or height > MAX_DIM:
         raise ValueError(
-            "entry.png is %dx%d, over the 1024x1024 limit" % (width, height)
+            "entry.png is %dx%d, over the 1024x1024 limit"
+            % (width, height)
         )
     dst = output_path()
-    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    parent = os.path.dirname(dst)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     with open(dst, "wb") as f:
         f.write(data)
     print("wrote %s: %dx%d, %d bytes" % (dst, width, height, len(data)))
