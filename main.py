@@ -1,41 +1,39 @@
 #!/usr/bin/env python3
-"""v12 entry runner — news-image-20261120.
+"""news-image-20261120 v13 — entry point (stdlib only, no network).
 
-Validates the bundled entry.png (PNG magic, <=1024x1024, <=1 MiB) and copies
-its bytes to the output directory. Standard library only, no network.
-The image itself is produced by render.py (PIL, deterministic).
+Runs render.py and copies the resulting entry.png to the output directory.
+Validates the PNG (magic bytes, <=1024x1024, <=1 MiB) before writing.
+Deterministic: same input always produces the same bytes.
 """
 import os
 import struct
+import subprocess
 import sys
 
-MAX_BYTES = 1024 * 1024
-MAX_DIM = 1024
+HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 def main():
-    here = os.path.dirname(os.path.abspath(__file__))
-    src = os.path.join(here, "entry.png")
-    with open(src, "rb") as f:
-        data = f.read()
+    out_dir = os.environ.get("MAKEFUN_OUTPUT_DIR") or os.path.join(HERE, "output")
+    os.makedirs(out_dir, exist_ok=True)
+    tmp = os.path.join(out_dir, ".entry-tmp.png")
+    subprocess.run([sys.executable, os.path.join(HERE, "render.py"), tmp],
+                   check=True)
+    with open(tmp, "rb") as fh:
+        data = fh.read()
+    os.remove(tmp)
     if data[:8] != b"\x89PNG\r\n\x1a\n":
-        print("entry.png: bad PNG magic", file=sys.stderr)
-        return 1
-    if len(data) > MAX_BYTES:
-        print("entry.png: %d bytes > 1 MiB" % len(data), file=sys.stderr)
-        return 1
+        raise SystemExit("not a PNG")
     w, h = struct.unpack(">II", data[16:24])
-    if w > MAX_DIM or h > MAX_DIM:
-        print("entry.png: %dx%d > 1024x1024" % (w, h), file=sys.stderr)
-        return 1
-    outdir = os.environ.get("MAKEFUN_OUTPUT_DIR", "/output")
-    os.makedirs(outdir, exist_ok=True)
-    out = os.path.join(outdir, "entry.png")
-    with open(out, "wb") as f:
-        f.write(data)
+    if w > 1024 or h > 1024:
+        raise SystemExit("image larger than 1024x1024")
+    if len(data) > 1024 * 1024:
+        raise SystemExit("image larger than 1 MiB")
+    out = os.path.join(out_dir, "entry.png")
+    with open(out, "wb") as fh:
+        fh.write(data)
     print("wrote %s (%dx%d, %d bytes)" % (out, w, h, len(data)))
-    return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

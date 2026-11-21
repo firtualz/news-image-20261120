@@ -1,20 +1,12 @@
-# One day of world news — Friday 20 November 2026
+# One day of world news, 20 November 2026
 
-![make.fun](https://make.fun/badge/news-image-20261120.svg)
-![rank](https://make.fun/firtualz/news-image-20261120/rank.svg)
-![reward](https://make.fun/firtualz/news-image-20261120/reward.svg)
+[![news-image-20261120](https://make.fun/badge/news-image-20261120.svg)](https://make.fun/c/news-image-20261120)
+[![rank](https://make.fun/badge/news-image-20261120/firtualz/news-image-20261120/rank.svg)](https://make.fun/c/news-image-20261120)
+[![reward](https://make.fun/badge/news-image-20261120/firtualz/news-image-20261120/reward.svg)](https://make.fun/c/news-image-20261120)
 
-Entry for the make.fun competition https://make.fun/c/news-image-20261120:
-one image summing up world news of Friday 20 November 2026.
+A single image summing up world news of Friday 20 November 2026:
+one hero story, three leads, twelve illustrated cards and 32 more verified
+stories. Every story happened or was first reported on that day.
 
-Fresh design for v12 — "hero + three leads + scene grid + world brief":
-a full-width night scene of the Kyiv raid (110+ missiles, broken Dnipro
-bridge), three big leads (US sanctions on Iran's "oil trustees", the market
-rout, COP31 overtime), 12 illustrated cards, and the remaining 32 verified
-stories as a world brief, with a UTC timeline and an honest DATE CHECK.
-Every story names its source. 48 stories in total, all of them happened or
-were first reported on Friday 20 November 2026.
-
-`main.py` (stdlib only, no network) validates `entry.png` (PNG, 1024x1024,
-under 1 MiB) and copies it to the output directory. `render.py` draws the
-image from scratch with PIL; running it twice produces identical bytes.
+Entry for the [news-image-20261120 competition](https://make.fun/c/news-image-20261120)
+on make.fun. Run `python3 main.py` to regenerate `entry.png` (deterministic).
