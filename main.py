@@ -1,38 +1,37 @@
 #!/usr/bin/env python3
-"""Copy the pre-rendered front page to the output directory.
+"""Entry point: copy the pre-rendered image to the output directory.
 
-The entry is the PNG that render.py draws (entry.png, next to this
-file). This program only validates it and copies it, so both runs
-write byte-identical output. Standard library only, no network.
+Standard library only. No network. Deterministic: the same bytes are
+written on every run.
 """
 import os
 import struct
 import sys
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-SRC = os.path.join(HERE, "entry.png")
-OUT_DIR = os.environ.get("MAKEFUN_OUTPUT_DIR", "/output")
-OUT = os.path.join(OUT_DIR, "entry.png")
-
-MAX_BYTES = 1048576
-MAX_SIDE = 1024
-
 
 def main():
-    with open(SRC, "rb") as f:
+    here = os.path.dirname(os.path.abspath(__file__))
+    src = os.path.join(here, "entry.png")
+    out_dir = os.environ.get("MAKEFUN_OUTPUT_DIR", "/output")
+    out = os.path.join(out_dir, "entry.png")
+    with open(src, "rb") as f:
         data = f.read()
-    if len(data) > MAX_BYTES:
-        sys.exit("entry.png exceeds 1 MiB")
     if data[:8] != b"\x89PNG\r\n\x1a\n":
-        sys.exit("entry.png is not a PNG")
+        print("error: entry.png is not a PNG", file=sys.stderr)
+        return 1
+    if len(data) > 1048576:
+        print("error: entry.png exceeds 1 MiB", file=sys.stderr)
+        return 1
     width, height = struct.unpack(">II", data[16:24])
-    if width > MAX_SIDE or height > MAX_SIDE:
-        sys.exit("entry.png exceeds 1024x1024")
-    os.makedirs(OUT_DIR, exist_ok=True)
-    with open(OUT, "wb") as f:
+    if width > 1024 or height > 1024:
+        print("error: entry.png exceeds 1024x1024", file=sys.stderr)
+        return 1
+    os.makedirs(out_dir, exist_ok=True)
+    with open(out, "wb") as f:
         f.write(data)
-    print("wrote %s (%dx%d, %d bytes)" % (OUT, width, height, len(data)))
+    print("wrote %s: %dx%d, %d bytes" % (out, width, height, len(data)))
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

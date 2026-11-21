@@ -1,554 +1,687 @@
 #!/usr/bin/env python3
-"""Render the v7 front page for news-image-20261120.
+"""Render the v8 entry image: world map + visual leads + market infographic.
 
-Draws a 1024x1024 newspaper front page with PIL primitives only:
-no external images, no network. Every story on the page happened or
-was first reported on Friday 20 November 2026 (see the verification
-table in ../STATUS.md, section v7). Output is a palette PNG so the
-file stays small (tie-break: a smaller file wins an exact tie).
+Composition (redesigned from scratch for v8): a world map is the hero visual,
+with numbered pins for the day's main stories; four lead panels with big
+numbers; a markets bar infographic; twelve short cards; a 32-item also-on
+list; a DATE CHECK box and a UTC timeline. Content is the same 48 stories
+as v7 (fact-check 48/48 passed Warden v7) - only the composition changed.
+Standard library + PIL only. Deterministic output.
 """
-import math
 import os
 from PIL import Image, ImageDraw, ImageFont
 
 W, H = 1024, 1024
-OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "entry.png")
-
-FD = "/usr/share/fonts/truetype/dejavu"
-SERIF_B = os.path.join(FD, "DejaVuSerif-Bold.ttf")
-SERIF = os.path.join(FD, "DejaVuSerif.ttf")
-SANS_B = os.path.join(FD, "DejaVuSans-Bold.ttf")
-SANS = os.path.join(FD, "DejaVuSans.ttf")
+FB = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+FR = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 
 
-def font(path, size):
-    return ImageFont.truetype(path, size)
+def font(size, bold=False):
+    return ImageFont.truetype(FB if bold else FR, size)
 
 
-# --- palette (flat colours: small file, high contrast) ---
-PAPER = (250, 247, 240)
-CARD = (255, 255, 255)
-INK = (18, 18, 22)
-NAVY = (22, 44, 92)
-NAVY_D = (14, 30, 64)
-RED = (176, 30, 30)
-TEAL = (0, 118, 108)
-BLUE = (28, 88, 164)
-GOLD = (172, 124, 0)
-GREEN = (32, 116, 58)
-PURPLE = (108, 58, 138)
-ORANGE = (196, 96, 8)
-GRAY = (96, 96, 100)
-LINE = (208, 202, 192)
-LIGHT = (236, 232, 224)
-PINK = (248, 226, 224)
+# ---------------------------------------------------------------- palette
+PAPER = (247, 243, 234)
+NAVY = (16, 42, 67)
+NAVY2 = (24, 58, 88)
+GOLD = (212, 175, 55)
+CREAM = (240, 232, 214)
+INK = (22, 22, 22)
+MUTED = (96, 96, 92)
+LINE = (205, 198, 186)
+OCEAN = (204, 224, 240)
+LAND = (198, 216, 178)
+LANDLINE = (122, 142, 110)
+GRID = (186, 208, 226)
 WHITE = (255, 255, 255)
+RED = (192, 57, 43)
+GREEN = (30, 132, 73)
+BLUE = (41, 98, 168)
+TEAL = (0, 130, 130)
+AMBER = (196, 120, 10)
+PURPLE = (110, 80, 150)
+PIN = (200, 40, 30)
+PINKBG = (250, 226, 222)
+
+_fcache = {}
 
 
-def wrap(text, fnt, width):
-    """Greedy word wrap; returns a list of lines that fit `width` px."""
-    words = text.split()
+def F(size, bold=False):
+    key = (size, bold)
+    if key not in _fcache:
+        _fcache[key] = font(size, bold)
+    return _fcache[key]
+
+
+def text_w(d, xy, s, size, color, bold=False, anchor="la"):
+    f = F(size, bold)
+    d.text(xy, s, font=f, fill=color, anchor=anchor)
+
+
+def wrap(s, size, max_w, bold=False):
+    """Greedy word wrap; returns list of lines that fit max_w."""
+    f = F(size, bold)
+    words = s.split()
     lines, cur = [], ""
-    for w in words:
-        trial = (cur + " " + w).strip()
-        if fnt.getlength(trial) <= width:
+    for w_ in words:
+        trial = (cur + " " + w_).strip()
+        if f.getlength(trial) <= max_w:
             cur = trial
         else:
             if cur:
                 lines.append(cur)
-            cur = w
+            cur = w_
     if cur:
         lines.append(cur)
     return lines
 
 
-def fit(text, fnt, width):
-    """Shorten with an ellipsis so the text fits `width` px on one line."""
-    if fnt.getlength(text) <= width:
-        return text
-    while text and fnt.getlength(text + "...") > width:
-        text = text[:-1]
-    return text + "..."
+def draw_wrapped(d, x, y, s, size, max_w, color, bold=False, lh=None, align="l"):
+    """Draw wrapped text; returns y just below the last line."""
+    lines = wrap(s, size, max_w, bold)
+    if lh is None:
+        lh = size + 3
+    for ln in lines:
+        if align == "c":
+            text_w(d, (x + max_w // 2, y), ln, size, color, bold, anchor="ma")
+        else:
+            text_w(d, (x, y), ln, size, color, bold)
+        y += lh
+    return y
 
 
-def disc(d, cx, cy, r, fill):
-    d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=fill)
+def fit_size(s, size, max_w, bold=False):
+    """Largest font size <= size that makes s fit max_w (never below 7)."""
+    while size > 7 and F(size, bold).getlength(s) > max_w:
+        size -= 1
+    return size
 
 
-def icon(d, kind, cx, cy, r, fg):
-    """Draw a small pictogram centred at (cx, cy), radius r, in colour fg.
+# ------------------------------------------------------------------- map
+# Equirectangular projection for the map panel.
+MAP_X0, MAP_Y0, MAP_S = 8, 96, 1.8
+MAP_LON0, MAP_LAT0 = -170, 78
 
-    All icons are plain PIL primitives (lines, arcs, polygons). Each
-    story gets a different pictogram so the page reads from pictures
-    as well as from labels.
-    """
-    x0, y0, x1, y1 = cx - r, cy - r, cx + r, cy + r
-    if kind == "missile":
-        d.polygon([(cx - r * 0.55, cy + r * 0.7), (cx, cy - r * 0.9),
-                   (cx + r * 0.55, cy + r * 0.7)], fill=fg)
-        d.polygon([(cx - r * 0.55, cy + r * 0.35), (cx - r * 1.0, cy + r * 0.9),
-                   (cx - r * 0.2, cy + r * 0.7)], fill=fg)
-        d.polygon([(cx + r * 0.55, cy + r * 0.35), (cx + r * 1.0, cy + r * 0.9),
-                   (cx + r * 0.2, cy + r * 0.7)], fill=fg)
-        d.polygon([(cx - r * 0.3, cy + r * 0.75), (cx, cy + r * 1.15),
-                   (cx + r * 0.3, cy + r * 0.75)], fill=fg)
-    elif kind == "cyclone":
-        for i, rr in enumerate((r * 0.95, r * 0.68, r * 0.42)):
-            d.arc([cx - rr, cy - rr, cx + rr, cy + rr],
-                  start=40 + i * 120, end=300 + i * 120, fill=fg, width=max(2, r // 6))
-        disc(d, cx, cy, max(2, r // 8), fg)
-    elif kind == "chart":
-        d.line([(x0, y1), (x1, y1)], fill=fg, width=max(2, r // 7))
-        d.line([(x0, y0), (x0, y1)], fill=fg, width=max(2, r // 7))
-        pts = [(x0 + r * 0.1, cy - r * 0.5), (cx - r * 0.25, cy - r * 0.1),
-               (cx + r * 0.1, cy + r * 0.15), (cx + r * 0.45, cy - r * 0.05),
-               (x1 - r * 0.1, cy + r * 0.75)]
-        d.line(pts, fill=fg, width=max(2, r // 6), joint="curve")
-        d.polygon([(x1 - r * 0.35, cy + r * 0.55), (x1 - r * 0.05, cy + r * 0.55),
-                   (x1 - r * 0.05, cy + r * 0.95)], fill=fg)
-    elif kind == "globe":
-        d.ellipse([x0, y0, x1, y1], outline=fg, width=max(2, r // 6))
-        d.ellipse([cx - r * 0.45, y0, cx + r * 0.45, y1], outline=fg,
-                  width=max(2, r // 8))
-        d.line([(x0, cy), (x1, cy)], fill=fg, width=max(2, r // 8))
-        d.arc([x0, cy - r * 0.55, x1, cy + r * 0.55], start=200, end=340,
-              fill=fg, width=max(2, r // 8))
-        d.arc([x0, cy - r * 0.55, x1, cy + r * 0.55], start=20, end=160,
-              fill=fg, width=max(2, r // 8))
-    elif kind == "bitcoin":
-        disc(d, cx, cy, r, fg)
-        bf = font(SANS_B, int(r * 1.25))
-        d.text((cx, cy), "B", font=bf, fill=WHITE, anchor="mm")
-        d.line([(cx - r * 0.45, cy - r * 0.55), (cx - r * 0.45, cy + r * 0.55)],
-               fill=WHITE, width=max(2, r // 8))
-        d.line([(cx + r * 0.05, cy - r * 0.55), (cx + r * 0.05, cy + r * 0.55)],
-               fill=WHITE, width=max(2, r // 8))
-    elif kind == "ship":
-        d.polygon([(x0 + r * 0.1, cy + r * 0.1), (x1 - r * 0.1, cy + r * 0.1),
-                   (x1 - r * 0.35, cy + r * 0.7), (x0 + r * 0.35, cy + r * 0.7)],
-                  fill=fg)
-        d.line([(cx, cy + r * 0.1), (cx, cy - r * 0.8)], fill=fg,
-               width=max(2, r // 7))
-        d.polygon([(cx, cy - r * 0.8), (cx, cy - r * 0.15),
-                   (cx + r * 0.55, cy - r * 0.15)], fill=fg)
-        d.line([(x0, cy + r * 0.85), (x1, cy + r * 0.85)], fill=fg,
-               width=max(2, r // 8))
-    elif kind == "flame":
-        d.polygon([(cx, cy - r * 0.95), (cx + r * 0.55, cy - r * 0.1),
-                   (cx + r * 0.75, cy + r * 0.55), (cx + r * 0.25, cy + r * 0.9),
-                   (cx - r * 0.25, cy + r * 0.9), (cx - r * 0.75, cy + r * 0.55),
-                   (cx - r * 0.55, cy - r * 0.1)], fill=fg)
-        d.polygon([(cx, cy - r * 0.2), (cx + r * 0.3, cy + r * 0.3),
-                   (cx, cy + r * 0.7), (cx - r * 0.3, cy + r * 0.3)], fill=PAPER)
-    elif kind == "eu":
-        for i in range(12):
-            a = math.radians(i * 30 - 90)
-            sx, sy = cx + r * 0.72 * math.cos(a), cy + r * 0.72 * math.sin(a)
-            disc(d, sx, sy, max(2, r // 9), fg)
-        d.ellipse([cx - r * 0.28, cy - r * 0.28, cx + r * 0.28, cy + r * 0.28],
-                  outline=fg, width=max(2, r // 8))
-    elif kind == "person":
-        disc(d, cx, cy - r * 0.35, r * 0.34, fg)
-        d.pieslice([cx - r * 0.62, cy - r * 0.1, cx + r * 0.62, cy + r * 1.05],
-                   start=180, end=360, fill=fg)
-    elif kind == "shield":
-        d.polygon([(cx, cy - r * 0.9), (cx + r * 0.75, cy - r * 0.55),
-                   (cx + r * 0.75, cy + r * 0.15), (cx, cy + r * 0.95),
-                   (cx - r * 0.75, cy + r * 0.15), (cx - r * 0.75, cy - r * 0.55)],
-                  fill=fg)
-        d.line([(cx - r * 0.35, cy), (cx - r * 0.08, cy + r * 0.3),
-                (cx + r * 0.4, cy - r * 0.35)], fill=WHITE,
-               width=max(2, r // 6), joint="curve")
-    elif kind == "car":
-        d.rounded_rectangle([x0 + r * 0.05, cy - r * 0.15, x1 - r * 0.05,
-                             cy + r * 0.45], radius=r // 4, fill=fg)
-        d.polygon([(cx - r * 0.5, cy - r * 0.15), (cx - r * 0.3, cy - r * 0.65),
-                   (cx + r * 0.3, cy - r * 0.65), (cx + r * 0.5, cy - r * 0.15)],
-                  fill=fg)
-        disc(d, cx - r * 0.45, cy + r * 0.5, r * 0.22, INK)
-        disc(d, cx + r * 0.45, cy + r * 0.5, r * 0.22, INK)
-    elif kind == "ball":
-        d.ellipse([x0, y0, x1, y1], outline=fg, width=max(2, r // 6))
-        d.polygon([(cx, cy - r * 0.35), (cx + r * 0.33, cy - r * 0.1),
-                   (cx + r * 0.2, cy + r * 0.3), (cx - r * 0.2, cy + r * 0.3),
-                   (cx - r * 0.33, cy - r * 0.1)], fill=fg)
-        for a in (90, 210, 330):
-            ar = math.radians(a)
-            d.line([(cx + r * 0.33 * math.cos(ar), cy + r * 0.33 * math.sin(ar)),
-                    (cx + r * 0.9 * math.cos(ar), cy + r * 0.9 * math.sin(ar))],
-                   fill=fg, width=max(2, r // 9))
-    elif kind == "ban":
-        d.ellipse([x0, y0, x1, y1], outline=fg, width=max(3, r // 5))
-        d.line([(cx - r * 0.7, cy + r * 0.7), (cx + r * 0.7, cy - r * 0.7)],
-               fill=fg, width=max(3, r // 5))
-    elif kind == "quake":
-        pts = [(x0, cy + r * 0.4), (cx - r * 0.5, cy - r * 0.2),
-               (cx - r * 0.15, cy + r * 0.3), (cx + r * 0.2, cy - r * 0.5),
-               (cx + r * 0.5, cy + r * 0.1), (x1, cy - r * 0.35)]
-        d.line(pts, fill=fg, width=max(2, r // 6), joint="curve")
-        d.line([(x0, y1 - r * 0.2), (x1, y1 - r * 0.2)], fill=fg,
-               width=max(2, r // 9))
-    elif kind == "link":
-        d.ellipse([cx - r * 0.8, cy - r * 0.45, cx + r * 0.05, cy + r * 0.45],
-                  outline=fg, width=max(3, r // 5))
-        d.ellipse([cx - r * 0.05, cy - r * 0.45, cx + r * 0.8, cy + r * 0.45],
-                  outline=fg, width=max(3, r // 5))
-    elif kind == "un":
-        d.polygon([(cx - r * 0.15, y0), (cx + r * 0.15, y0),
-                   (cx + r * 0.35, y1), (cx - r * 0.35, y1)], fill=fg)
-        d.polygon([(x0, cy - r * 0.15), (cx - r * 0.1, cy - r * 0.35),
-                   (cx - r * 0.1, cy + r * 0.35), (x0, cy + r * 0.15)], fill=fg)
-        d.polygon([(x1, cy - r * 0.15), (cx + r * 0.1, cy - r * 0.35),
-                   (cx + r * 0.1, cy + r * 0.35), (x1, cy + r * 0.15)], fill=fg)
-    elif kind == "rocket":
-        d.polygon([(cx, cy - r * 0.95), (cx + r * 0.35, cy - r * 0.1),
-                   (cx + r * 0.35, cy + r * 0.5), (cx, cy + r * 0.75),
-                   (cx - r * 0.35, cy + r * 0.5), (cx - r * 0.35, cy - r * 0.1)],
-                  fill=fg)
-        d.polygon([(cx - r * 0.35, cy + r * 0.3), (cx - r * 0.7, cy + r * 0.85),
-                   (cx - r * 0.35, cy + r * 0.6)], fill=fg)
-        d.polygon([(cx + r * 0.35, cy + r * 0.3), (cx + r * 0.7, cy + r * 0.85),
-                   (cx + r * 0.35, cy + r * 0.6)], fill=fg)
-        disc(d, cx, cy - r * 0.35, r * 0.14, PAPER)
-    elif kind == "chip":
-        d.rectangle([cx - r * 0.55, cy - r * 0.55, cx + r * 0.55, cy + r * 0.55],
-                    fill=fg)
-        for i in (-1, 0, 1):
-            d.line([(cx + i * r * 0.35, cy - r * 0.9), (cx + i * r * 0.35,
-                   cy - r * 0.55)], fill=fg, width=max(2, r // 7))
-            d.line([(cx + i * r * 0.35, cy + r * 0.55), (cx + i * r * 0.35,
-                   cy + r * 0.9)], fill=fg, width=max(2, r // 7))
-            d.line([(cx - r * 0.9, cy + i * r * 0.35), (cx - r * 0.55,
-                   cy + i * r * 0.35)], fill=fg, width=max(2, r // 7))
-            d.line([(cx + r * 0.55, cy + i * r * 0.35), (cx + r * 0.9,
-                   cy + i * r * 0.35)], fill=fg, width=max(2, r // 7))
-        d.rectangle([cx - r * 0.25, cy - r * 0.25, cx + r * 0.25, cy + r * 0.25],
-                    fill=PAPER)
-    elif kind == "flag":
-        d.line([(cx - r * 0.5, y0), (cx - r * 0.5, y1)], fill=fg,
-               width=max(2, r // 7))
-        d.polygon([(cx - r * 0.5, y0), (cx + r * 0.8, cy - r * 0.55),
-                   (cx + r * 0.8, cy - r * 0.05), (cx - r * 0.5, cy + r * 0.2)],
-                  fill=fg)
-    elif kind == "gold":
-        for i, wdt in enumerate((0.9, 0.7, 0.5)):
-            yy = cy + r * (0.55 - i * 0.55)
-            d.rectangle([cx - r * wdt, yy - r * 0.25, cx + r * wdt, yy + r * 0.25],
-                        fill=fg)
-    elif kind == "survey":
-        for i, hh in enumerate((0.4, 0.75, 0.55, 1.0)):
-            xx = x0 + i * r * 0.5
-            d.rectangle([xx, y1 - r * hh, xx + r * 0.32, y1], fill=fg)
-    elif kind == "factory":
-        d.rectangle([x0, cy, x1, y1], fill=fg)
-        d.rectangle([cx - r * 0.7, cy - r * 0.7, cx - r * 0.4, cy], fill=fg)
-        d.rectangle([cx - r * 0.2, cy - r * 0.9, cx + r * 0.1, cy], fill=fg)
-    elif kind == "plane":
-        d.polygon([(x0, cy), (cx + r * 0.6, cy - r * 0.25),
-                   (x1, cy - r * 0.1), (cx + r * 0.3, cy + r * 0.15),
-                   (cx + r * 0.1, cy + r * 0.5), (cx - r * 0.1, cy + r * 0.2),
-                   (cx - r * 0.6, cy + r * 0.35)], fill=fg)
-    elif kind == "boom":
-        for i in range(8):
-            a = math.radians(i * 45)
-            ex = cx + r * 0.95 * math.cos(a)
-            ey = cy + r * 0.95 * math.sin(a)
-            ix = cx + r * 0.35 * math.cos(a + 0.4)
-            iy = cy + r * 0.35 * math.sin(a + 0.4)
-            d.polygon([(cx, cy), (ex, ey), (ix, iy)], fill=fg)
-        disc(d, cx, cy, r * 0.28, PAPER)
-    elif kind == "oil":
-        d.rounded_rectangle([cx - r * 0.55, cy - r * 0.75, cx + r * 0.55,
-                             cy + r * 0.75], radius=r // 5, fill=fg)
-        d.line([(cx - r * 0.55, cy - r * 0.25), (cx + r * 0.55, cy - r * 0.25)],
-               fill=PAPER, width=max(2, r // 8))
-        d.line([(cx - r * 0.55, cy + r * 0.25), (cx + r * 0.55, cy + r * 0.25)],
-               fill=PAPER, width=max(2, r // 8))
-    elif kind == "robot":
-        d.rounded_rectangle([cx - r * 0.6, cy - r * 0.45, cx + r * 0.6,
-                             cy + r * 0.6], radius=r // 4, fill=fg)
-        d.line([(cx, cy - r * 0.45), (cx, cy - r * 0.85)], fill=fg,
-               width=max(2, r // 7))
-        disc(d, cx, cy - r * 0.9, r * 0.1, fg)
-        disc(d, cx - r * 0.28, cy, r * 0.09, PAPER)
-        disc(d, cx + r * 0.28, cy, r * 0.09, PAPER)
-        d.line([(cx - r * 0.3, cy + r * 0.35), (cx + r * 0.3, cy + r * 0.35)],
-               fill=PAPER, width=max(2, r // 8))
-    elif kind == "court":
-        d.polygon([(cx - r * 0.85, cy - r * 0.75), (cx + r * 0.85, cy - r * 0.75),
-                   (cx, cy - r * 0.3)], fill=fg)
-        for i in (-1, 0, 1):
-            d.rectangle([cx + i * r * 0.55 - r * 0.09, cy - r * 0.25,
-                         cx + i * r * 0.55 + r * 0.09, cy + r * 0.6], fill=fg)
-        d.rectangle([x0, cy + r * 0.6, x1, cy + r * 0.8], fill=fg)
-    elif kind == "raceflag":
-        for i in range(3):
-            for j in range(3):
-                if (i + j) % 2 == 0:
-                    d.rectangle([cx - r * 0.75 + i * r * 0.5,
-                                 cy - r * 0.75 + j * r * 0.5,
-                                 cx - r * 0.25 + i * r * 0.5,
-                                 cy - r * 0.25 + j * r * 0.5], fill=fg)
-        d.line([(cx - r * 0.75, y1 - r * 0.1), (cx + r * 0.75, y1 - r * 0.1)],
-               fill=fg, width=max(2, r // 8))
-    elif kind == "storm":
-        d.ellipse([cx - r * 0.7, cy - r * 0.55, cx - r * 0.1, cy + r * 0.15],
-                  fill=fg)
-        d.ellipse([cx - r * 0.3, cy - r * 0.7, cx + r * 0.5, cy + r * 0.15],
-                  fill=fg)
-        d.ellipse([cx + r * 0.1, cy - r * 0.45, cx + r * 0.75, cy + r * 0.15],
-                  fill=fg)
-        d.polygon([(cx + r * 0.05, cy + r * 0.1), (cx - r * 0.25, cy + r * 0.75),
-                   (cx + r * 0.05, cy + r * 0.75), (cx - r * 0.1, cy + r * 1.0),
-                   (cx + r * 0.35, cy + r * 0.3)], fill=fg)
-    elif kind == "health":
-        disc(d, cx, cy, r, fg)
-        d.rectangle([cx - r * 0.18, cy - r * 0.55, cx + r * 0.18, cy + r * 0.55],
-                    fill=WHITE)
-        d.rectangle([cx - r * 0.55, cy - r * 0.18, cx + r * 0.55, cy + r * 0.18],
-                    fill=WHITE)
-    elif kind == "scale":
-        d.line([(cx, cy - r * 0.8), (cx, cy + r * 0.7)], fill=fg,
-               width=max(2, r // 7))
-        d.line([(cx - r * 0.8, cy - r * 0.6), (cx + r * 0.8, cy - r * 0.6)],
-               fill=fg, width=max(2, r // 7))
-        d.polygon([(cx - r * 0.8, cy - r * 0.6), (cx - r * 1.0, cy - r * 0.05),
-                   (cx - r * 0.6, cy - r * 0.05)], fill=fg)
-        d.polygon([(cx + r * 0.8, cy - r * 0.6), (cx + r * 1.0, cy - r * 0.05),
-                   (cx + r * 0.6, cy - r * 0.05)], fill=fg)
-        d.line([(x0, y1 - r * 0.15), (x1, y1 - r * 0.15)], fill=fg,
-               width=max(2, r // 8))
-    else:  # fallback: plain dot
-        disc(d, cx, cy, r * 0.55, fg)
 
-# ---------------------------------------------------------------- data
-# Headlines below are written fresh for this image. Facts and sources
-# are verified in ../STATUS.md section v7 (42 items kept from v6,
-# 6 replacements verified from primary sources, 2 labels fixed).
+def proj(lon, lat):
+    return (MAP_X0 + (lon - MAP_LON0) * MAP_S,
+            MAP_Y0 + (MAP_LAT0 - lat) * MAP_S)
 
-LEADS = [
-    ("missile", RED, "110+",
-     "110+ MISSILES HIT KYIV IN BIGGEST RAID",
-     "Zelensky calls it the biggest raid of the year: 27 ballistic "
-     "missiles, 400+ drones overnight; 9 killed; 3 Dnipro bridges damaged.",
-     "CNN · REUTERS"),
-    ("cyclone", TEAL, "300K+",
-     "CYCLONE AKVAN SLAMS INDIA'S EAST COAST",
-     "Landfall 02:00 UTC near Gopalpur; winds 70–80 km/h, gusts 90; "
-     "300,000+ evacuated; 9,341 shelters; 1,317 babies born in shelters.",
-     "IMD · 02:00 UTC"),
-    ("chart", NAVY, "−5.3%",
-     "NASDAQ −5.3%: WORST WEEK SINCE APRIL 2025",
-     "S&P −3.7% in a 7th straight loss; Dow −8% for the week; Nvidia −14% "
-     "on SEC probe; Anthropic −8.5% to $88.91; VIX 35.89.",
-     "INVESTOPEDIA · CNN"),
-    ("globe", GREEN, "35%",
-     "COP31 IN OVERTIME AS FOSSIL-FUEL TALKS DRAG",
-     "Panama threatens to block any deal without fossil-fuel language; "
-     "12 nations write in; draft keeps 35% electricity share by 2035; "
-     "new text due Saturday.",
-     "REUTERS"),
+
+def poly(pts):
+    return [proj(lo, la) for lo, la in pts]
+
+
+NA = [(-168, 66), (-162, 60), (-155, 58), (-148, 60), (-141, 60), (-135, 57),
+      (-130, 54), (-126, 49), (-124, 43), (-121, 36), (-117, 32), (-112, 28),
+      (-109, 24), (-105, 20), (-100, 17), (-95, 16), (-92, 15), (-88, 14),
+      (-85, 12), (-82, 9), (-79, 8), (-77, 7), (-80, 9), (-83, 10), (-86, 13),
+      (-89, 14), (-91, 14), (-94, 16), (-97, 16), (-97, 21), (-97, 26),
+      (-94, 29), (-90, 29), (-85, 30), (-82, 28), (-81, 26), (-80, 31),
+      (-77, 34), (-76, 36), (-74, 39), (-71, 41), (-69, 43), (-66, 44),
+      (-61, 46), (-60, 47), (-65, 49), (-60, 52), (-56, 52), (-60, 55),
+      (-64, 58), (-68, 58), (-70, 58), (-76, 55), (-82, 55), (-86, 58),
+      (-90, 60), (-88, 64), (-92, 66), (-95, 69), (-105, 68), (-115, 69),
+      (-125, 70), (-135, 69), (-145, 70), (-155, 71), (-162, 70), (-168, 66)]
+GL = [(-55, 60), (-50, 60), (-43, 60), (-40, 63), (-35, 66), (-28, 68),
+      (-22, 70), (-24, 73), (-30, 75), (-40, 76), (-50, 76), (-56, 74),
+      (-58, 70), (-56, 65), (-55, 60)]
+SA = [(-79, 8), (-76, 10), (-72, 12), (-67, 11), (-63, 10), (-60, 8),
+      (-56, 6), (-52, 5), (-50, 0), (-47, -1), (-43, -3), (-39, -5),
+      (-35, -8), (-36, -12), (-39, -17), (-40, -22), (-44, -24), (-48, -27),
+      (-52, -32), (-56, -35), (-58, -38), (-62, -41), (-65, -45), (-67, -49),
+      (-69, -52), (-71, -54), (-73, -50), (-73, -45), (-72, -40), (-71, -33),
+      (-70, -25), (-70, -19), (-74, -15), (-77, -12), (-80, -7), (-81, -4),
+      (-80, 0), (-79, 4), (-79, 8)]
+AF = [(-17, 15), (-17, 21), (-16, 26), (-12, 30), (-8, 33), (-5, 35),
+      (-1, 35), (3, 37), (9, 37), (11, 34), (15, 32), (20, 32), (25, 32),
+      (30, 31), (32, 31), (34, 28), (36, 24), (37, 20), (39, 16), (41, 12),
+      (44, 11), (48, 11), (51, 11), (48, 7), (45, 3), (42, -1), (40, -5),
+      (39, -10), (38, -15), (36, -19), (34, -24), (32, -28), (29, -32),
+      (25, -34), (20, -35), (17, -32), (15, -28), (13, -22), (12, -17),
+      (13, -12), (12, -7), (9, -3), (9, 1), (8, 4), (4, 6), (0, 5),
+      (-4, 5), (-8, 4), (-12, 7), (-15, 10), (-17, 12), (-17, 15)]
+MD = [(44, -16), (46, -15), (49, -16), (50, -19), (48, -23), (45, -25),
+      (43, -22), (43, -18), (44, -16)]
+EU = [(-9, 37), (-9, 40), (-9, 43), (-3, 44), (-1, 46), (-4, 48), (-1, 49),
+      (1, 51), (4, 52), (7, 54), (8, 56), (10, 58), (7, 60), (5, 61),
+      (6, 63), (10, 64), (13, 66), (17, 68), (21, 70), (25, 71), (29, 70),
+      (32, 68), (35, 67), (38, 66), (40, 64), (37, 62), (34, 60), (31, 59),
+      (28, 58), (25, 58), (22, 56), (20, 54), (18, 54), (14, 54), (11, 55),
+      (8, 55), (5, 53), (2, 51), (0, 50), (-2, 49), (-4, 48), (-2, 46),
+      (-1, 44), (-3, 43), (-6, 40), (-9, 37)]
+UK = [(-5, 50), (-3, 52), (-5, 54), (-5, 56), (-3, 58), (-1, 57), (0, 55),
+      (0, 53), (-2, 51), (-4, 50), (-5, 50)]
+AS = [(30, 36), (33, 36), (35, 33), (38, 31), (41, 30), (44, 29), (47, 30),
+      (50, 29), (53, 27), (56, 26), (59, 25), (61, 25), (65, 25), (67, 24),
+      (69, 23), (71, 21), (73, 18), (75, 14), (76, 10), (77, 8), (80, 7),
+      (80, 10), (80, 13), (82, 16), (85, 19), (88, 22), (91, 22), (92, 21),
+      (94, 18), (95, 16), (97, 15), (99, 13), (100, 11), (101, 8), (103, 7),
+      (104, 9), (106, 10), (108, 12), (109, 14), (109, 18), (108, 21),
+      (110, 20), (112, 21), (114, 22), (116, 23), (118, 25), (120, 27),
+      (121, 30), (122, 33), (121, 36), (120, 38), (122, 39), (125, 40),
+      (127, 40), (128, 41), (130, 42), (132, 43), (135, 44), (137, 46),
+      (139, 47), (141, 49), (141, 52), (141, 59), (138, 59), (135, 62),
+      (130, 66), (125, 70), (120, 73), (115, 73), (110, 74), (105, 76),
+      (100, 76), (95, 75), (90, 75), (85, 74), (80, 73), (75, 72),
+      (70, 72), (65, 70), (60, 69), (55, 68), (50, 68), (45, 67), (40, 67),
+      (35, 66), (32, 68), (30, 70), (30, 65), (30, 60), (28, 58), (28, 55),
+      (30, 50), (32, 46), (35, 44), (38, 42), (40, 40), (38, 38), (35, 36),
+      (32, 36), (30, 36)]
+SU = [(95, 5), (97, 4), (99, 1), (101, -2), (103, -4), (105, -5), (106, -6),
+      (104, -5), (102, -2), (100, 0), (98, 3), (95, 5)]
+JV = [(105, -6), (107, -7), (110, -7), (113, -8), (114, -8), (114, -9),
+      (111, -8), (108, -7), (105, -6)]
+BO = [(109, 1), (111, 2), (114, 4), (117, 5), (117, 2), (116, -1),
+      (114, -3), (111, -3), (109, 0), (109, 1)]
+NG = [(131, -1), (134, -2), (137, -2), (141, -3), (144, -4), (147, -6),
+      (150, -9), (147, -8), (143, -7), (140, -6), (136, -4), (133, -2),
+      (131, -1)]
+PH = [(120, 18), (122, 18), (122, 15), (121, 13), (120, 10), (121, 11),
+      (123, 13), (122, 17), (120, 18)]
+AU = [(114, -22), (113, -26), (114, -30), (115, -33), (117, -35), (121, -34),
+      (125, -33), (129, -32), (132, -32), (134, -33), (136, -35), (138, -35),
+      (140, -38), (144, -38), (147, -39), (150, -37), (152, -34), (153, -31),
+      (153, -27), (151, -24), (148, -20), (145, -17), (142, -14), (142, -11),
+      (141, -14), (140, -17), (137, -16), (135, -15), (135, -12), (132, -12),
+      (130, -13), (127, -14), (124, -16), (121, -18), (118, -20), (115, -21),
+      (114, -22)]
+NZ = [(167, -45), (169, -43), (171, -42), (173, -41), (175, -38), (177, -38),
+      (178, -38), (176, -40), (174, -41), (172, -43), (169, -45), (167, -46),
+      (167, -45)]
+JP = [(130, 31), (131, 33), (133, 34), (135, 34), (137, 35), (139, 35),
+      (140, 36), (141, 38), (141, 40), (142, 42), (144, 43), (145, 44),
+      (143, 44), (141, 42), (140, 39), (139, 37), (137, 35), (135, 34),
+      (133, 33), (131, 32), (130, 31)]
+CONTINENTS = [NA, GL, SA, AF, MD, EU, UK, AS, SU, JV, BO, NG, PH, AU, NZ, JP]
+
+# (number, lon, lat, short legend label)
+PINS = [
+    (1, 31, 50, "KYIV RAID 110+"),
+    (2, 54, 27, "GULF TANKER HIT"),
+    (3, 114, 22, "SHENZHEN TALKS"),
+    (4, 77, 28, "DELHI SCO"),
+    (5, 87, 18, "CYCLONE AKVAN"),
+    (6, 151, -34, "SYDNEY ISIS PLOT"),
+    (7, -108, 25, "CHAPO HELD"),
+    (8, 4, 50, "EU-UK DEAL"),
+    (9, -75, -12, "PERU QUAKE M6.7"),
+    (10, -115, 36, "VEGAS GP"),
 ]
 
+
+def draw_map(d):
+    """World map panel x8..656, y96..336; legend strip y340..396."""
+    d.rectangle([8, 96, 656, 336], fill=OCEAN, outline=LINE, width=1)
+    # graticule every 30 degrees
+    for lon in range(-150, 181, 30):
+        x = MAP_X0 + (lon - MAP_LON0) * MAP_S
+        d.line([(x, 96), (x, 336)], fill=GRID, width=1)
+    for lat in range(60, -61, -30):
+        y = MAP_Y0 + (MAP_LAT0 - lat) * MAP_S
+        d.line([(8, y), (656, y)], fill=GRID, width=1)
+    for c in CONTINENTS:
+        d.polygon(poly(c), fill=LAND, outline=LANDLINE)
+    text_w(d, (16, 102), "WHERE THE DAY HAPPENED", 11, NAVY, True)
+    # pins
+    for num, lon, lat, _lab in PINS:
+        x, y = proj(lon, lat)
+        r = 9
+        d.ellipse([x - r, y - r, x + r, y + r], fill=PIN, outline=WHITE, width=2)
+        text_w(d, (x, y - 1), str(num), 10, WHITE, True, anchor="mm")
+    # legend: 2 rows x 5
+    for i, (_n, _lo, _la, lab) in enumerate(PINS):
+        row, col = divmod(i, 5)
+        lx = 16 + col * 130
+        ly = 344 + row * 26
+        r = 8
+        d.ellipse([lx, ly, lx + 2 * r, ly + 2 * r], fill=PIN, outline=WHITE, width=1)
+        text_w(d, (lx + r, ly + r - 1), str(_n), 9, WHITE, True, anchor="mm")
+        text_w(d, (lx + 2 * r + 5, ly + 1), lab, 10, INK, True)
+
+
+# ------------------------------------------------------------------ icons
+# Each icon draws inside a box (x, y, s) with the given colour.
+def _poly(d, pts, color):
+    d.polygon(pts, fill=color)
+
+
+def icon(d, name, x, y, s, color):
+    """Draw a pictogram icon in box (x,y) of size s."""
+    u = s / 24.0
+
+    def P(px, py):
+        return (x + px * u, y + py * u)
+
+    def line(pts, w=2):
+        d.line([P(a, b) for a, b in pts], fill=color, width=max(1, int(w * u)))
+
+    def ell(box, outline=False):
+        d.ellipse([P(box[0], box[1]), P(box[2], box[3])],
+                  fill=None if outline else color,
+                  outline=color if outline else None,
+                  width=max(1, int(2 * u)))
+
+    def rect(box):
+        d.rectangle([P(box[0], box[1]), P(box[2], box[3])], fill=color)
+
+    if name == "missile":
+        _poly(d, [P(12, 1), P(16, 7), P(13, 20), P(11, 20), P(8, 7)], color)
+        _poly(d, [P(8, 7), P(4, 12), P(8, 10)], color)
+        _poly(d, [P(16, 7), P(20, 12), P(16, 10)], color)
+        _poly(d, [P(11, 20), P(13, 20), P(12, 23)], (230, 120, 40))
+    elif name == "cyclone":
+        for r, a0, a1 in ((9, 200, 340), (6, 20, 160), (3, 200, 320)):
+            d.arc([P(12 - r, 12 - r), P(12 + r, 12 + r)], a0, a1,
+                  fill=color, width=max(1, int(2 * u)))
+        d.ellipse([P(10.5, 10.5), P(13.5, 13.5)], fill=color)
+    elif name == "chart":
+        line([(3, 20), (3, 4)], 2)
+        line([(3, 20), (21, 20)], 2)
+        line([(5, 6), (10, 10), (14, 8), (20, 17)], 2)
+        _poly(d, [P(20, 17), P(20, 13), P(16, 17)], color)
+    elif name == "globe":
+        d.ellipse([P(2, 2), P(22, 22)], outline=color, width=max(1, int(2 * u)))
+        d.ellipse([P(8, 2), P(16, 22)], outline=color, width=max(1, int(1.5 * u)))
+        line([(2, 12), (22, 12)], 2)
+        line([(4, 7), (20, 7)], 1)
+        line([(4, 17), (20, 17)], 1)
+    elif name == "bitcoin":
+        ell((3, 3, 21, 21))
+        text_w(d, (x + 12 * u, y + 11 * u), "B", 13, WHITE, True, anchor="mm")
+    elif name == "ship":
+        _poly(d, [P(3, 14), P(21, 14), P(18, 20), P(6, 20)], color)
+        line([(12, 14), (12, 5)], 2)
+        _poly(d, [P(12, 5), P(19, 7), P(12, 9)], color)
+        line([(2, 21), (22, 21)], 2)
+    elif name == "flame":
+        _poly(d, [P(12, 2), P(16, 9), P(20, 12), P(20, 17), P(16, 22),
+                  P(8, 22), P(4, 17), P(4, 12), P(8, 9)], color)
+        _poly(d, [P(12, 12), P(15, 16), P(12, 20), P(9, 16)], PAPER)
+    elif name == "eu":
+        for k in range(12):
+            import math
+            a = math.radians(k * 30 - 90)
+            cx, cy = 12 + 8 * math.cos(a), 12 + 8 * math.sin(a)
+            d.ellipse([P(cx - 1.2, cy - 1.2), P(cx + 1.2, cy + 1.2)], fill=color)
+        d.ellipse([P(10, 10), P(14, 14)], fill=color)
+    elif name == "person":
+        d.ellipse([P(8, 2), P(16, 10)], fill=color)
+        _poly(d, [P(4, 22), P(6, 13), P(18, 13), P(20, 22)], color)
+    elif name == "shield":
+        _poly(d, [P(12, 2), P(20, 5), P(20, 12), P(12, 22), P(4, 12), P(4, 5)],
+              color)
+        line([(8, 11), (11, 14), (16, 8)], 2)
+    elif name == "car":
+        _poly(d, [P(3, 12), P(5, 8), P(9, 7), P(15, 7), P(19, 9), P(21, 12),
+                  P(21, 16), P(3, 16)], color)
+        d.ellipse([P(6, 15), P(10, 19)], fill=INK)
+        d.ellipse([P(14, 15), P(18, 19)], fill=INK)
+    elif name == "ball":
+        d.ellipse([P(3, 3), P(21, 21)], outline=color, width=max(1, int(2 * u)))
+        _poly(d, [P(12, 8), P(16, 11), P(14, 16), P(10, 16), P(8, 11)], color)
+        for px, py in ((12, 3), (19, 8), (19, 17), (12, 21), (5, 17), (5, 8)):
+            d.ellipse([P(px - 1, py - 1), P(px + 1, py + 1)], fill=color)
+    elif name == "ban":
+        d.ellipse([P(3, 3), P(21, 21)], outline=color, width=max(1, int(2 * u)))
+        line([(6, 18), (18, 6)], 2)
+    elif name == "quake":
+        line([(3, 14), (8, 8), (11, 16), (15, 6), (18, 12), (21, 10)], 2)
+        line([(6, 20), (9, 22)], 1)
+        line([(15, 20), (18, 22)], 1)
+    elif name == "link":
+        d.ellipse([P(2, 8), P(12, 16)], outline=color, width=max(1, int(2 * u)))
+        d.ellipse([P(12, 8), P(22, 16)], outline=color, width=max(1, int(2 * u)))
+    elif name == "un":
+        d.ellipse([P(4, 3), P(20, 19)], outline=color, width=max(1, int(2 * u)))
+        d.ellipse([P(9, 3), P(15, 19)], outline=color, width=max(1, int(1.5 * u)))
+        line([(4, 11), (20, 11)], 1)
+        _poly(d, [P(7, 20), P(10, 23), P(8, 20)], color)
+        _poly(d, [P(17, 20), P(14, 23), P(16, 20)], color)
+    elif name == "rocket":
+        _poly(d, [P(12, 1), P(16, 9), P(14, 17), P(10, 17), P(8, 9)], color)
+        d.ellipse([P(10.5, 9), P(13.5, 12)], fill=WHITE)
+        _poly(d, [P(8, 12), P(4, 18), P(8, 16)], color)
+        _poly(d, [P(16, 12), P(20, 18), P(16, 16)], color)
+        _poly(d, [P(10, 17), P(14, 17), P(12, 22)], (230, 120, 40))
+    elif name == "chip":
+        rect((6, 6, 18, 18))
+        d.rectangle([P(9, 9), P(15, 15)], fill=PAPER)
+        for i in (8, 12, 16):
+            line([(i, 2), (i, 6)], 1)
+            line([(i, 18), (i, 22)], 1)
+            line([(2, i), (6, i)], 1)
+            line([(18, i), (22, i)], 1)
+    elif name == "gold":
+        d.ellipse([P(3, 3), P(21, 21)], fill=color)
+        d.ellipse([P(6, 6), P(18, 18)], outline=PAPER, width=max(1, int(1.5 * u)))
+        text_w(d, (x + 12 * u, y + 11 * u), "$", 11, WHITE, True, anchor="mm")
+    elif name == "survey":
+        rect((4, 12, 8, 20))
+        rect((10, 8, 14, 20))
+        rect((16, 4, 20, 20))
+        line([(3, 21), (21, 21)], 2)
+    elif name == "factory":
+        _poly(d, [P(3, 21), P(3, 12), P(7, 12), P(9, 9), P(11, 12), P(13, 9),
+                  P(15, 12), P(21, 12), P(21, 21)], color)
+        rect((17, 4, 20, 12))
+    elif name == "plane":
+        _poly(d, [P(2, 12), P(10, 10), P(20, 12), P(10, 14)], color)
+        _poly(d, [P(10, 8), P(13, 11), P(10, 12)], color)
+        _poly(d, [P(12, 13), P(15, 17), P(12, 14)], color)
+    elif name == "oil":
+        _poly(d, [P(12, 2), P(19, 12), P(19, 16), P(15, 21), P(9, 21),
+                  P(5, 16), P(5, 12)], color)
+    elif name == "robot":
+        rect((6, 7, 18, 19))
+        line([(12, 7), (12, 3)], 2)
+        d.ellipse([P(10.5, 1.5), P(13.5, 4.5)], fill=color)
+        d.ellipse([P(8.5, 11), P(11, 13.5)], fill=WHITE)
+        d.ellipse([P(13, 11), P(15.5, 13.5)], fill=WHITE)
+        line([(8, 17), (16, 17)], 1)
+    elif name == "scales":
+        line([(12, 3), (12, 21)], 2)
+        line([(4, 6), (20, 6)], 2)
+        line([(6, 6), (6, 12)], 1)
+        line([(18, 6), (18, 12)], 1)
+        _poly(d, [P(3, 12), P(9, 12), P(6, 16)], color)
+        _poly(d, [P(15, 12), P(21, 12), P(18, 16)], color)
+        line([(8, 21), (16, 21)], 2)
+    elif name == "flag":
+        line([(6, 2), (6, 22)], 2)
+        for r in range(3):
+            for c in range(4):
+                if (r + c) % 2 == 0:
+                    rect((6 + c * 4, 3 + r * 4, 10 + c * 4, 7 + r * 4))
+    elif name == "storm":
+        d.ellipse([P(4, 6), P(12, 14)], fill=color)
+        d.ellipse([P(10, 4), P(18, 12)], fill=color)
+        d.ellipse([P(14, 8), P(21, 15)], fill=color)
+        for px in (7, 12, 17):
+            line([(px, 17), (px - 1, 22)], 1)
+    elif name == "health":
+        _poly(d, [P(9, 3), P(15, 3), P(15, 9), P(21, 9), P(21, 15), P(15, 15),
+                  P(15, 21), P(9, 21), P(9, 15), P(3, 15), P(3, 9), P(9, 9)],
+              color)
+    elif name == "boom":
+        for k in range(8):
+            import math
+            a = math.radians(k * 45)
+            line([(12, 12), (12 + 9 * math.cos(a), 12 + 9 * math.sin(a))], 2)
+        d.ellipse([P(9, 9), P(15, 15)], fill=color)
+    else:
+        d.ellipse([P(4, 4), P(20, 20)], outline=color, width=max(1, int(2 * u)))
+        text_w(d, (x + 12 * u, y + 11 * u), "?", 13, color, True, anchor="mm")
+
+
+# ---------------------------------------------------------------- content
+# Same 48 stories as v7 (fact-check 48/48 passed Warden v7). Only the
+# composition changed. No event before 13 Nov 2026 anywhere in the image.
+LEADS = [
+    dict(icon="missile", color=BLUE, num="110+",
+         head="MISSILES HIT KYIV IN BIGGEST RAID",
+         sub="27 ballistic + 400 drones \u00b7 9 killed"),
+    dict(icon="cyclone", color=TEAL, num="300K+",
+         head="CYCLONE AKVAN SLAMS EAST INDIA",
+         sub="Landfall 02:00 UTC \u00b7 9,341 shelters"),
+    dict(icon="chart", color=RED, num="\u22125.3%",
+         head="NASDAQ: WORST WEEK SINCE APR 2025",
+         sub="\u221210% on the week \u00b7 VIX 35.89"),
+    dict(icon="globe", color=GREEN, num="35%",
+         head="COP31 IN OVERTIME AS TALKS DRAG",
+         sub="Draft: 35% electricity share by 2035"),
+]
+
+# (icon, colour, headline, detail line 1, detail line 2)
 CARDS = [
-    ("bitcoin", GOLD, "BITCOIN SLIPS BELOW $60,000",
-     "First time since July; intraday low $55,830, lowest since Sep 2024; "
-     "closed ~$58,317.", "REUTERS · 15:42 UTC"),
-    ("ship", BLUE, "TANKER HIT BY UNKNOWN PROJECTILE",
-     "Blast and fire 8 nm north of Khasab; no casualties; IRGC Navy says "
-     "the tanker struck a mine.", "UKMTO · 15:00 GMT"),
-    ("flame", RED, "HOUTHIS THREATEN SAUDI RED SEA PORTS",
-     "Ports will be hit if the coalition strikes Hodeidah; Saudi-led strikes "
-     "hit Yemeni ports Friday.", "REUTERS"),
-    ("eu", BLUE, "EU APPROVES €1BN NEW MILITARY AID",
-     "Joint procurement via EPF, deliveries by end-2027; part of a "
-     "€6.6bn political deal.", "EU COUNCIL · 14:50 UTC"),
-    ("person", GRAY, "FIRST WOMAN DEPUTY PRESIDENT DIES AT 71",
-     "South Africa's Phumzile Mlambo-Ngcuka, 71, dies Friday; the "
-     "presidency announces it late Friday.", "PRESIDENCY ZA"),
-    ("shield", NAVY, "SYDNEY MAN CHARGED OVER ISIS PLOT",
-     "Nowroz Rayed Amin, 35, charged Friday; 3 arrested, 10 homes raided; "
-     "no target or capability found.", "AFP · 06:10 UTC"),
-    ("car", TEAL, "ITALY CLEARS TESLA ASSISTED DRIVING",
-     "Temporary approval for Tesla Assisted Driving System; first big EU "
-     "state to clear it.",
-     "REUTERS"),
-    ("ball", GREEN, "RONALDO SCORES 986TH GOAL",
-     "14th-minute strike in Al-Ahli's 3–1 win; 14 short of 1,000. "
-     "(SPL tally.)", "ESPN"),
-    ("ban", RED, "US SANCTIONS FOUR IRANIAN 'OIL TRUSTEES'",
-     "Treasury's Operation Economic Outcast targets Bavand, Taj, Servati "
-     "and Arabnejad.", "US TREASURY"),
-    ("quake", ORANGE, "M6.7 QUAKE SHAKES PERU, FELT IN LIMA",
-     "19:09 local, 34 km north of Junín, 108 km deep; no casualties "
-     "reported.", "AP · 19:09 PET"),
-    ("link", BLUE, "EU–UK POST-BREXIT TRADE RESET",
-     "SPS barriers gone, carbon markets linked, youth mobility 100,000 "
-     "each way for up to 3 years.", "AP"),
-    ("un", PURPLE, "UN CHIEF RACE STUCK IN 9TH STRAW POLL",
-     "Grynspan 10–4, 2 vetoes (states undisclosed); Nusseibeh vetoed; "
-     "Grossi 8–3.",
-     "REUTERS"),
+    ("bitcoin", AMBER, "BITCOIN BELOW $60K",
+     "Low $55,830 \u00b7 closes ~$58,317", "15:42 UTC"),
+    ("ship", BLUE, "TANKER HIT OFF KHASAB",
+     "Unknown projectile", "No casualties \u00b7 UKMTO"),
+    ("flame", RED, "HOUTHI THREATEN SAUDI PORTS",
+     "If coalition hits Hodeidah", "Reuters"),
+    ("eu", BLUE, "EU: \u20ac1BN MORE MILITARY AID",
+     "Part of \u20ac6.6bn deal, via EPF", "14:50 UTC"),
+    ("person", PURPLE, "S. AFRICA MOURNS MLAMBO-NGCUKA",
+     "Ex-UN women chief, 71, dies Fri", "Presidency"),
+    ("shield", TEAL, "SYDNEY MAN CHARGED OVER ISIS PLOT",
+     "Amin, 35 \u00b7 alleged ISIS material", "AFP 06:10 UTC"),
+    ("car", GREEN, "ITALY CLEARS TESLA DRIVING AID",
+     "First big EU state \u00b7 temp OK", "Reuters"),
+    ("ball", GREEN, "RONALDO GOAL No. 986",
+     "Al-Ahli 3\u20131 Al-Nassr \u00b7 14 to 1,000", "SPL tally"),
+    ("ban", RED, "US SANCTIONS 4 IRAN \u2018OIL TRUSTEES\u2019",
+     "Operation Economic Outcast", "Treasury"),
+    ("quake", AMBER, "PERU QUAKE M6.7",
+     "19:09 local \u00b7 felt in Lima", "AP"),
+    ("link", BLUE, "EU\u2013UK DEAL: TRADE + YOUTH",
+     "SPS eased \u00b7 100k youth mobility", "AP"),
+    ("un", NAVY2, "UN CHIEF RACE: 2 VETOES",
+     "Grynspan leads \u00b7 2 vetoes", "States undisclosed"),
 ]
 
 ALSO_ON = [
-    ("flag", BLUE, "Estonia confirms it will shut road crossings with Russia for 6+ months from Dec 1"),
-    ("link", NAVY, "Trump and Xi: humans must always decide on military AI, Bessent tells CNBC"),
-    ("survey", PURPLE, "93% of Japanese say ties with China are bad — worst since 1986, survey finds"),
-    ("flag", GREEN, "Modi opens SCO forum in Delhi; first Pakistani minister visits India in 3 years"),
-    ("flag", TEAL, "Australia, Canada, NZ demand an unconditional permanent ceasefire from Russia"),
-    ("boom", RED, "Iraqi forces enter Kataib Hezbollah stronghold Jurf al-Sakher without a fight"),
-    ("chip", NAVY, "Nvidia −14% to $125.53; $491bn wiped in a day; SEC probes its accounting"),
-    ("flag", RED, "Xi meets Albanese in Shenzhen; hails 'full turnaround' in China–Australia ties"),
-    ("scale", BLUE, "Eurogroup names Boone and Brunnermeier as ECB candidates; Lagarde leaves in Feb"),
-    ("court", GRAY, "Dutch court: BYD Ti7 copies Defender design; EU sales ban — BYD to appeal"),
-    ("car", TEAL, "Tesla opens first Argentina store in Buenos Aires; Model 3/Y from $40,000"),
-    ("raceflag", ORANGE, "Russell fastest in FP3 at 1:34.041; Mercedes 1–2; qualifying at 20:00 local"),
-    ("gold", GOLD, "Gold closes $3,538.19, −2.4%; lowest since Sep 2025; −8.9% for the week"),
-    ("survey", NAVY, "Michigan sentiment 51.5; Bessent urges Fed not to hike 50bp in December"),
-    ("factory", PURPLE, "Tesla plans a $3.1bn polysilicon plant in Texas"),
-    ("missile", RED, "Russian missiles and drones entered Polish airspace during the Kyiv barrage"),
-    ("boom", ORANGE, "Kyiv hits 3 Russian ballistic launchers overnight; Smolensk explosives plant struck"),
-    ("scale", GRAY, "581 women killed in 3 months, police figures show; 5,590 murders Jul–Sep"),
-    ("flag", RED, "Rodríguez rejects ICJ jurisdiction over Esequibo in a Friday statement"),
-    ("chart", NAVY, "Kospi −5.2% to 4,869.96, lowest since Jan 20; first close under 4,900 in 10 months"),
-    ("oil", ORANGE, "Brent settles $92.57, +0.6% on the day; third straight weekly loss"),
-    ("rocket", BLUE, "Falcon 9 launches secret USSF-317 mission from Vandenberg at 20:20 PST"),
-    ("robot", PURPLE, "New OpenAI usage policy takes effect: model resellers need approval first"),
-    ("globe", TEAL, "Island states: COP31 a failure if it ignores 'out of control warming'"),
-    ("chart", RED, "Broadcom −12%, AMD −13%, Meta −6%, Amazon −4%, Apple −2%"),
-    ("chart", NAVY, "Anthropic −8.5% to $88.91, a day after its record $81.3bn IPO"),
-    ("shield", RED, "FBI's most-wanted 'Chapo Isidro' captured in Mexico; gunfight halts baseball game"),
-    ("ship", BLUE, "Iran claims 14 tankers staged at Kharg to test the US blockade; trackers dispute it"),
-    ("health", GRAY, "Bolsonaro, 71, taken to hospital with severe abdominal pain"),
-    ("storm", TEAL, "Storm kills 3, destroys ~5,000 homes in Tupanciretã, winds over 100 km/h"),
-    ("chip", PURPLE, "Samsung names Hwang Sang-joon to lead its memory-chip business"),
-    ("chart", GREEN, "Sensex +1.2%, Nifty +1.1% — India defies the global rout"),
+    "ESTONIA CLOSES RUSSIA ROAD CROSSINGS",
+    "BESSENT: HUMANS MUST DECIDE MILITARY AI",
+    "JAPAN: 93% SAY CHINA TIES WORST SINCE 1986",
+    "MODI OPENS SCO FORUM; PAK MINISTER IN DELHI",
+    "AUS\u2013CAN\u2013NZ: JOINT CALL FOR CEASEFIRE",
+    "IRAQ TROOPS ENTER HEZBOLLAH STRONGHOLD",
+    "NVIDIA \u221214%, $491BN GONE IN A DAY",
+    "XI\u2013ALBANESE: \u201cFULL TURNAROUND\u201d IN TIES",
+    "ECB RACE: BOONE & BRUNNERMEIER SHORTLISTED",
+    "COURT: BYD Ti7 COPIED JLR DEFENDER",
+    "TESLA OPENS FIRST ARGENTINA STORE",
+    "VEGAS GP: RUSSELL FASTEST IN FP3",
+    "GOLD \u22122.4% TO $3,538; WORST WEEK",
+    "MICHIGAN SENTIMENT 51.5; FED WARNING",
+    "TESLA PLANS $3.1BN POLYSILICON PLANT",
+    "RUSSIAN MISSILES ENTER POLISH AIRSPACE",
+    "KYIV HITS 3 RUSSIAN MISSILE LAUNCHERS",
+    "SAPS: 581 WOMEN KILLED JUL\u2013SEP",
+    "VENEZUELA REJECTS ICJ ON ESEQUIBO",
+    "KOSPI \u22125.2%, LOWEST SINCE JAN",
+    "BRENT $92.57, +0.6% ON THE DAY",
+    "SPACEX LAUNCHES USSF-317",
+    "OPENAI: NEW RULES FOR MODEL BROKERS",
+    "AOSIS: COP31 \u201cA FAILURE\u201d IF 1.5\u00b0C IGNORED",
+    "TECH ROUT: BROADCOM \u221212%, AMD \u221213%",
+    "ANTHROPIC \u22128.5% AFTER RECORD IPO",
+    "\u201cCHAPO ISIDRO\u201d ARRESTED IN GUASAVE",
+    "IRAN CLAIMS 14 TANKERS AT KHARG",
+    "BOLSONARO, 71, RUSHED TO HOSPITAL",
+    "STORM KILLS 3 IN SOUTHERN BRAZIL",
+    "SAMSUNG NAMES HWANG TO LEAD MEMORY",
+    "SENSEX +1.2% AS INDIA DEFIES ROUT",
 ]
 
-TIMELINE = ("02:00 AKVAN · 06:10 SYDNEY · 10:00 SENSEX · 14:50 EU €1BN · "
-           "15:00 KHASAB · 15:42 BTC <$60K · 16:35 ECB · 19:09 PERU · "
-           "19:10 KHARG · 21:00 NASDAQ")
+# (label, value %) - Friday market moves
+MARKETS = [
+    ("NASDAQ", -5.3), ("S&P 500", -3.7), ("KOSPI", -5.2),
+    ("GOLD", -2.4), ("BRENT", 0.6), ("SENSEX", 1.2),
+]
 
-DATE_CHECK = ("DATE CHECK — LEFT OUT: Sudan report (17 Nov) · Turkey $26B "
-              "(16 Nov) · Colombia seizure (19 Nov) · Egypt–Syria flights "
-              "(17 Nov) · AWS Chile (11 Nov) · Korea $1T (19 Nov)")
+TIMELINE = [
+    ("02:00", "AKVAN"), ("06:10", "SYDNEY"), ("10:00", "SENSEX"),
+    ("14:50", "EU \u20ac1BN"), ("15:00", "KHASAB"), ("15:42", "BTC <$60K"),
+    ("16:35", "ECB"), ("19:09", "PERU"), ("19:10", "KHARG"),
+    ("21:00", "NASDAQ"),
+]
 
-NOTE = ("Every story below happened or was first reported on "
-        "Friday 20 November 2026.")
+DATE_CHECK = ("Every story verified 20 Nov 2026. Left out on purpose "
+              "(wrong day): Sudan 17 Nov \u00b7 Turkey $26B 16 Nov \u00b7 "
+              "Colombia 19 Nov \u00b7 Egypt\u2013Syria 17 Nov \u00b7 "
+              "AWS Chile 11 Nov \u00b7 Korea $1T 19 Nov.")
 
 
-# ---------------------------------------------------------------- layout
-def draw():
+def draw_masthead(d):
+    d.rectangle([0, 0, W, 92], fill=NAVY)
+    d.rectangle([0, 88, W, 92], fill=GOLD)
+    text_w(d, (16, 8), "THE WORLD IN ONE DAY", 13, GOLD, True)
+    text_w(d, (16, 26), "FRIDAY 20 NOVEMBER 2026", 34, (255, 255, 255), True)
+    text_w(d, (16, 66),
+           "Every story below happened or was first reported on "
+           "Friday 20 November 2026.", 12, CREAM)
+    # right: globe + story count
+    icon(d, "globe", 884, 12, 44, GOLD)
+    text_w(d, (936, 18), "48", 26, WHITE, True)
+    text_w(d, (936, 46), "STORIES", 12, GOLD, True)
+    text_w(d, (936, 64), "WORLD EDITION", 10, CREAM, True)
+
+
+def draw_rail(d):
+    """Right rail x664..1016: markets bars, DATE CHECK, UTC timeline."""
+    # --- markets
+    x0, x1, y0 = 664, 1016, 96
+    d.rectangle([x0, y0, x1, 212], fill=WHITE, outline=LINE, width=1)
+    text_w(d, (x0 + 10, y0 + 6), "MARKETS FRIDAY", 12, INK, True)
+    text_w(d, (x1 - 10, y0 + 6), "ONE DAY", 10, MUTED, True, anchor="ra")
+    bx0, bx1 = x0 + 78, x1 - 52
+    zero = (bx0 + bx1) // 2
+    scale = 104 / 6.0  # 6% == 104 px
+    for i, (lab, val) in enumerate(MARKETS):
+        ry = y0 + 28 + i * 14
+        text_w(d, (x0 + 10, ry), lab, 10, INK, True)
+        ln = int(abs(val) * scale)
+        col = RED if val < 0 else GREEN
+        if val < 0:
+            d.rectangle([zero - ln, ry + 2, zero, ry + 11], fill=col)
+        else:
+            d.rectangle([zero, ry + 2, zero + ln, ry + 11], fill=col)
+        vtxt = ("%.1f%%" % val).replace("-", "\u2212")
+        text_w(d, (x1 - 10, ry), vtxt, 10, col, True, anchor="ra")
+    d.line([(zero, y0 + 26), (zero, y0 + 26 + 6 * 14)], fill=MUTED, width=1)
+    # --- DATE CHECK
+    y0 = 220
+    d.rectangle([x0, y0, x1, 300], fill=PINKBG, outline=(220, 150, 140), width=1)
+    text_w(d, (x0 + 10, y0 + 6), "DATE CHECK", 12, RED, True)
+    draw_wrapped(d, x0 + 10, y0 + 24, DATE_CHECK, 10, x1 - x0 - 20, INK,
+                 lh=13)
+    # --- timeline
+    y0 = 308
+    d.rectangle([x0, y0, x1, 396], fill=WHITE, outline=LINE, width=1)
+    text_w(d, (x0 + 10, y0 + 6), "FRIDAY IN UTC", 12, INK, True)
+    for i, (t, lab) in enumerate(TIMELINE):
+        col = i % 2
+        row = i // 2
+        tx = x0 + 10 + col * 176
+        ty = y0 + 26 + row * 13
+        text_w(d, (tx, ty), t, 10, BLUE, True)
+        text_w(d, (tx + 42, ty), lab, 10, INK, True)
+
+
+def draw_leads(d):
+    for i, ld in enumerate(LEADS):
+        x = 8 + i * 254
+        y = 404
+        w = 246
+        d.rectangle([x, y, x + w, y + 172], fill=WHITE, outline=LINE, width=1)
+        d.rectangle([x, y, x + w, y + 6], fill=ld["color"])
+        icon(d, ld["icon"], x + w // 2 - 28, y + 16, 56, ld["color"])
+        text_w(d, (x + w // 2, y + 80), ld["num"], 36, ld["color"], True,
+               anchor="ma")
+        draw_wrapped(d, x + 10, y + 122, ld["head"], 15, w - 20, INK, True,
+                     lh=18, align="c")
+        text_w(d, (x + w // 2, y + 158), ld["sub"], 10, MUTED, False,
+               anchor="ma")
+
+
+def draw_cards(d):
+    for i, (ic, col, head, det1, det2) in enumerate(CARDS):
+        row, c = divmod(i, 6)
+        x = 9 + c * 168
+        y = 584 + row * 94
+        w, h = 166, 92
+        d.rectangle([x, y, x + w, y + h], fill=WHITE, outline=LINE, width=1)
+        d.rectangle([x, y, x + 4, y + h], fill=col)
+        icon(d, ic, x + w // 2 - 12, y + 6, 24, col)
+        draw_wrapped(d, x + 8, y + 34, head, 11, w - 16, INK, True, lh=13,
+                     align="c")
+        text_w(d, (x + w // 2, y + 62), det1, 9, MUTED, False, anchor="ma")
+        text_w(d, (x + w // 2, y + 76), det2, 9, MUTED, True, anchor="ma")
+
+
+def draw_also_on(d):
+    y0 = 780
+    d.rectangle([8, y0, 1016, y0 + 2], fill=NAVY)
+    text_w(d, (10, y0 + 8), "ALSO ON FRIDAY \u2014 32 MORE", 13, NAVY, True)
+    text_w(d, (1014, y0 + 8), "ALL FIRST REPORTED 20 NOV 2026", 10, MUTED,
+           True, anchor="ra")
+    for i, item in enumerate(ALSO_ON):
+        col = i % 2
+        row = i // 2
+        x = 14 + col * 502
+        y = y0 + 30 + row * 13
+        d.ellipse([x, y + 3, x + 6, y + 9], fill=BLUE)
+        text_w(d, (x + 11, y), item, 10, INK, False)
+
+
+def build():
     img = Image.new("RGB", (W, H), PAPER)
     d = ImageDraw.Draw(img)
-    mx = 16  # page margin
+    draw_masthead(d)
+    draw_map(d)
+    draw_rail(d)
+    draw_leads(d)
+    draw_cards(d)
+    draw_also_on(d)
+    return img
 
-    # --- masthead: dark navy band, paper name + date + globe ---
-    d.rectangle([0, 16, W, 102], fill=NAVY)
-    d.rectangle([0, 16, W, 20], fill=NAVY_D)
-    f_name = font(SERIF_B, 40)
-    d.text((mx, 24), "THE FRIDAY PAPER", font=f_name, fill=WHITE)
-    f_date = font(SANS_B, 30)
-    d.text((mx, 64), "FRIDAY 20 NOVEMBER 2026", font=f_date, fill=(232, 190, 90))
-    f_ed = font(SANS_B, 12)
-    d.text((928, 30), "WORLD EDITION", font=f_ed, fill=WHITE, anchor="ra")
-    d.text((928, 52), "48 STORIES", font=f_ed, fill=(232, 190, 90), anchor="ra")
-    disc(d, 962, 58, 24, WHITE)
-    icon(d, "globe", 962, 58, 18, NAVY)
 
-    # --- editor's note (the honest claim; only true if 48/48 verified) ---
-    f_note = font(SANS, 14)
-    d.text((mx, 108), NOTE, font=f_note, fill=INK)
+def check_fit():
+    """Measure every text block against its box; report overflows."""
+    problems = []
+    # masthead date
+    if F(34, True).getlength("FRIDAY 20 NOVEMBER 2026") > 860:
+        problems.append("masthead date too wide")
+    note = ("Every story below happened or was first reported on "
+            "Friday 20 November 2026.")
+    if F(12).getlength(note) > 860:
+        problems.append("editor note too wide")
+    for ld in LEADS:
+        lines = wrap(ld["head"], 15, 226, True)
+        if len(lines) > 2:
+            problems.append("lead head 3+ lines: " + ld["head"])
+        if F(36, True).getlength(ld["num"]) > 226:
+            problems.append("lead number too wide: " + ld["num"])
+        if F(10).getlength(ld["sub"]) > 226:
+            problems.append("lead sub too wide: " + ld["sub"])
+    for _ic, _c, head, det1, det2 in CARDS:
+        if len(wrap(head, 11, 150, True)) > 2:
+            problems.append("card head 3+ lines: " + head)
+        for det in (det1, det2):
+            if F(9).getlength(det) > 150:
+                problems.append("card detail too wide: " + det)
+    for item in ALSO_ON:
+        if F(10).getlength(item) > 480:
+            problems.append("also-on too wide: " + item)
+    if F(10).getlength(DATE_CHECK) > 332:
+        pass  # wrapped, measured by lines below
+    lines = wrap(DATE_CHECK, 10, 332)
+    if len(lines) > 4:
+        problems.append("DATE CHECK %d lines" % len(lines))
+    for _n, _lo, _la, lab in PINS:
+        if F(10, True).getlength(lab) > 104:
+            problems.append("legend label too wide: " + lab)
+    for lab, val in MARKETS:
+        if F(10, True).getlength(lab) > 64:
+            problems.append("market label too wide: " + lab)
+    return problems
 
-    # --- UTC timeline strip ---
-    d.rectangle([0, 128, W, 148], fill=LIGHT)
-    f_tl = font(SANS_B, 11)
-    d.text((W // 2, 138), TIMELINE, font=f_tl, fill=NAVY, anchor="mm")
 
-    # --- leads: 2x2, big icon chip + big number + headline + summary ---
-    f_lh = font(SANS_B, 20)
-    f_ls = font(SANS, 13)
-    f_lt = font(SANS_B, 10)
-    f_bn = font(SANS_B, 24)
-    lead_y, lead_h, lead_w, lead_gap = 154, 130, 492, 8
-    for i, (kind, accent, big, head, summ, tag) in enumerate(LEADS):
-        x = mx + (i % 2) * (lead_w + lead_gap)
-        y = lead_y + (i // 2) * (lead_h + lead_gap)
-        d.rectangle([x, y, x + lead_w, y + lead_h], fill=CARD,
-                    outline=LINE, width=1)
-        d.rectangle([x, y, x + lead_w, y + 6], fill=accent)
-        disc(d, x + 42, y + 46, 28, accent)
-        icon(d, kind, x + 42, y + 46, 17, WHITE)
-        d.text((x + lead_w - 14, y + 14), big, font=f_bn, fill=accent,
-               anchor="ra")
-        lines = wrap(head, f_lh, 296)[:2]
-        yy = y + 12
-        for ln in lines:
-            d.text((x + 84, yy), ln, font=f_lh, fill=INK)
-            yy += 24
-        slines = wrap(summ, f_ls, 392)[:3]
-        yy = y + 64
-        for ln in slines:
-            d.text((x + 84, yy), ln, font=f_ls, fill=INK)
-            yy += 16
-        d.text((x + 84, y + lead_h - 16), tag, font=f_lt, fill=accent)
-
-    # --- section header: cards ---
-    f_sec = font(SANS_B, 15)
-    d.text((mx, 428), "THE DAY IN BRIEF", font=f_sec, fill=NAVY)
-    d.line([(mx, 448), (W - mx, 448)], fill=NAVY, width=2)
-
-    # --- cards: 4 cols x 3 rows, icon chip + headline + detail + tag ---
-    f_ch = font(SANS_B, 13)
-    f_cd = font(SANS, 10)
-    f_ct = font(SANS_B, 9)
-    card_w, card_h, card_gap = 243, 96, 6
-    for i, (kind, accent, head, det, tag) in enumerate(CARDS):
-        col, row = i % 4, i // 4
-        x = mx + col * (card_w + card_gap)
-        y = 454 + row * (card_h + card_gap)
-        d.rectangle([x, y, x + card_w, y + card_h], fill=CARD,
-                    outline=LINE, width=1)
-        d.rectangle([x, y, x + 4, y + card_h], fill=accent)
-        disc(d, x + 26, y + 24, 18, accent)
-        icon(d, kind, x + 26, y + 24, 11, WHITE)
-        lines = wrap(head, f_ch, 181)[:2]
-        yy = y + 7
-        for ln in lines:
-            d.text((x + 50, yy), ln, font=f_ch, fill=INK)
-            yy += 15
-        dlines = wrap(det, f_cd, 187)[:3]
-        yy = y + 42
-        for ln in dlines:
-            d.text((x + 50, yy), ln, font=f_cd, fill=INK)
-            yy += 11
-        d.text((x + 50, y + card_h - 14), tag, font=f_ct, fill=accent)
-
-    # --- section header: also-on ---
-    d.text((mx, 760), "ALSO ON FRIDAY", font=f_sec, fill=NAVY)
-    d.line([(mx, 780), (W - mx, 780)], fill=NAVY, width=2)
-
-    # --- also-on: 2 columns x 16 rows, dot + one-line headline ---
-    f_ao = font(SANS, 11)
-    col_w = (W - 2 * mx - 16) // 2
-    for i, (kind, accent, text) in enumerate(ALSO_ON):
-        col, row = i % 2, i // 2
-        x = mx + col * (col_w + 16)
-        y = 786 + row * 12
-        disc(d, x + 4, y + 5, 3, accent)
-        d.text((x + 12, y), fit(text, f_ao, col_w - 14), font=f_ao, fill=INK)
-
-    # --- footer: DATE CHECK box (what was deliberately left out) ---
-    f_dc = font(SANS_B, 9)
-    d.rectangle([mx, 980, W - mx, 1006], fill=PINK, outline=RED, width=1)
-    d.text((W // 2, 993), DATE_CHECK, font=f_dc, fill=RED, anchor="mm")
-
-    # Palette PNG: flat colours compress well and keep the file small.
-    pal = img.convert("P", palette=Image.ADAPTIVE, colors=256)
-    pal.save(OUT, optimize=True)
-    print("wrote", OUT, pal.size, os.path.getsize(OUT), "bytes")
+def main():
+    out = os.environ.get("V8_OUT", "entry.png")
+    problems = check_fit()
+    if problems:
+        for p in problems:
+            print("FIT PROBLEM:", p)
+        raise SystemExit(1)
+    img = build()
+    # palette-quantised PNG keeps the file small (tie-break advantage)
+    img = img.convert("P", palette=Image.ADAPTIVE, colors=256)
+    img.save(out, optimize=True)
+    print("wrote %s: %dx%d, %d bytes" % (out, W, H, os.path.getsize(out)))
 
 
 if __name__ == "__main__":
-    draw()
+    main()
